@@ -1,11 +1,11 @@
 import { HttpStatus, Inject, Injectable } from '@nestjs/common';
-import { CreateOrderDto } from './dto/create-order.dto';
-import { PrismaService } from 'src/prisma.service';
 import { ClientProxy, RpcException } from '@nestjs/microservices';
-import { OrderPaginationDto } from './dto/order-pagination.dto';
-import { ChangeOrderStatusDto } from './dto';
-import { NATS_SERVICE } from 'src/config';
 import { firstValueFrom } from 'rxjs';
+import { NATS_SERVICE } from 'src/config';
+import { PrismaService } from 'src/prisma.service';
+import { ChangeOrderStatusDto, CreateOrderDto, OrderPaginationDto, PaidOrderDto } from './dto';
+import { OrderWithProducts } from './interfaces/order-with-products.interface';
+import { OrderStatus } from 'generated/prisma/enums';
 
 @Injectable()
 export class OrdersService {
@@ -146,6 +146,56 @@ export class OrdersService {
     const updatedOrder = await this.prisma.order.update({
       where: { id },
       data: { status }
+    });
+
+    return updatedOrder;
+  }
+
+  async createPaymentSession(order: OrderWithProducts) {
+    try {
+      const paymentSession = await firstValueFrom(
+        this.client.send('create.payment.session', {
+          orderId: order.id,
+          currency: 'usd',
+          items: order.OrderItem.map(item => ({
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity
+          })),
+        })
+      );
+
+      return paymentSession;
+    } catch (error) {
+      console.log(`Error while creating payment session: ${(error instanceof Object) ? JSON.stringify(error) : error}`);
+
+      throw new RpcException({
+        status: 'error',
+        message: `Error while creating payment session, try again`,
+        statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+      });
+    }
+  }
+
+  async paidOrder(paidOrderDto: PaidOrderDto) {    
+    const order = await this.findOne(paidOrderDto.orderId);
+    if (order.status === OrderStatus.PAID) return order;
+
+    const updatedOrder = await this.prisma.order.update({
+      where: { id: paidOrderDto.orderId },
+      data: {
+        status: OrderStatus.PAID,
+        paid: true,
+        paidAt: new Date(),
+        stripeChargeId: paidOrderDto.stripePaymentId,
+
+        // relación con OrderReceipt
+        orderReceipt: {
+          create: {
+            receiptUrl: paidOrderDto.receiptUrl
+          }
+        }
+      }
     });
 
     return updatedOrder;
